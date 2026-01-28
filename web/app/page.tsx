@@ -69,6 +69,7 @@ export default function Home() {
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [query, setQuery] = useState<string>("");
   const [copyStatus, setCopyStatus] = useState<string>("");
+  const [failAt, setFailAt] = useState<"none" | "transform" | "tool_call">("none");
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -89,7 +90,11 @@ export default function Home() {
       const res = await fetch(`${API_URL}/runs`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ workflow: "demo", input: { hello: "world" } }),
+        body: JSON.stringify({
+          workflow: "demo",
+          input: { hello: "world" },
+          fail_at: failAt === "none" ? null : failAt
+        })
       });
 
       if (!res.ok) {
@@ -209,6 +214,16 @@ export default function Home() {
             >
               Create Run
             </button>
+
+            <select
+              value={failAt}
+              onChange={(e) => setFailAt(e.target.value as typeof failAt)}
+              className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
+            >
+              <option value="none">Fail: none</option>
+              <option value="transform">Fail: transform</option>
+              <option value="tool_call">Fail: tool_call</option>
+            </select>
 
             <button
               className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-50 hover:bg-white/[0.05]"
