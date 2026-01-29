@@ -80,6 +80,8 @@ export default function Home() {
   }, []);
 
   async function createRun() {
+    esRef.current?.close();
+    esRef.current = null;
     setStatus("creating run...");
     setEvents([]);
     setRunId("");
@@ -111,11 +113,27 @@ export default function Home() {
     }
   }
 
+  function getClientId() {
+    if (typeof window === "undefined") {
+      return "ssr";
+    }
+
+    const k = "dq_client_id";
+    let v = sessionStorage.getItem(k);
+
+    if (!v) {
+      v = crypto.randomUUID();
+      sessionStorage.setItem(k, v);
+    }
+
+    return v;
+  }
+
   function connectSSE(id: string) {
     esRef.current?.close();
 
     setStatus("connecting SSE...");
-    const es = new EventSource(`${API_URL}/runs/${id}/events`);
+    const es = new EventSource(`${API_URL}/runs/${id}/events?client_id=${encodeURIComponent(getClientId())}`);
     esRef.current = es;
 
     es.onmessage = (msg) => {
@@ -292,8 +310,14 @@ export default function Home() {
 
               <button
                 onClick={() => {
+                  // stop streaming so the list does NOT immediately refill
+                  esRef.current?.close();
+                  esRef.current = null;
+
+                  setEvents([]);
                   setQuery("");
                   setTypeFilter("all");
+                  setStatus("idle");
                 }}
                 className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/80 hover:bg-white/[0.06]"
               >
