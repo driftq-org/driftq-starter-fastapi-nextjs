@@ -72,6 +72,27 @@ export default function Home() {
   const [failAt, setFailAt] = useState<"none" | "transform" | "tool_call">("none");
   const esRef = useRef<EventSource | null>(null);
 
+  async function replayRun() {
+    if (!runId) return;
+
+    try {
+      const res = await fetch(`${API_URL}/runs/${runId}/replay`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        setStatus(`replay failed: ${res.status} ${txt}`);
+        return;
+      }
+
+      setStatus("replay requested");
+    } catch (err) {
+      setStatus(`replay failed: ${(err as Error)?.message ?? "unknown error"}`);
+    }
+  }
+
   useEffect(() => {
     return () => {
       esRef.current?.close();
@@ -257,6 +278,14 @@ export default function Home() {
               onClick={emitPing}
             >
               Emit Ping
+            </button>
+
+            <button
+              className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-50 hover:bg-white/[0.05]"
+              disabled={!runId}
+              onClick={replayRun}
+            >
+              Replay Run
             </button>
           </div>
 
