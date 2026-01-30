@@ -2,16 +2,43 @@ import asyncio
 import json
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .driftq_client import DriftQClient
 
-app = FastAPI(title="driftq-fastapi-nextjs-starter API")
+DLQ_TOPIC = "runs.dlq"
+
+# Demo-only: keep latest DLQ record per run_id in memory
+DLQ_CACHE: dict[str, dict] = {}
+DLQ_CACHE_MAX = 200
+
+_dlq_task: asyncio.Task | None = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start/stop background tasks (FastAPI lifespan, replaces deprecated on_event)."""
+    global _dlq_task
+    _dlq_task = asyncio.create_task(dlq_indexer())
+    try:
+        yield
+    finally:
+        if _dlq_task:
+            _dlq_task.cancel()
+            try:
+                await _dlq_task
+            except asyncio.CancelledError:
+                pass
+            _dlq_task = None
+
+
+app = FastAPI(title="driftq-fastapi-nextjs-starter API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,7 +100,6 @@ async def _produce(topic: str, value: Dict[str, Any], *, idem_key: Optional[str]
 
 @app.post("/runs", response_model=RunCreateResponse)
 async def create_run(req: RunCreateRequest):
-    # print("CREATE_RUN req.workflow=", req.workflow, "req.fail_at=", req.fail_at)
     run_id = uuid.uuid4().hex
     events_topic = f"{EVENTS_PREFIX}{run_id}"
 
@@ -114,10 +140,29 @@ async def create_run(req: RunCreateRequest):
 
 
 @app.post("/runs/{run_id}/replay")
-async def replay_run(run_id: str):
+async def replay_run(
+    run_id: str,
+    fail_at: Optional[str] = Query(
+        default=None,
+        description=(
+            "Optional override for replay failure injection: none|transform|tool_call. "
+            "If omitted, uses the run's original fail_at."
+        )
+    )
+):
     meta = RUNS.get(run_id)
     if not meta:
         raise HTTPException(status_code=404, detail="run not found")
+    applied_fail_at = meta.get("fail_at")
+
+    if fail_at is not None:
+        fa = (fail_at or "").strip().lower()
+        if fa in ("", "none"):
+            applied_fail_at = None
+        elif fa in ("transform", "tool_call"):
+            applied_fail_at = fa
+        else:
+            raise HTTPException(status_code=400, detail="fail_at must be one of: none, transform, tool_call")
 
     meta["replay_seq"] += 1
     seq = meta["replay_seq"]
@@ -130,7 +175,13 @@ async def replay_run(run_id: str):
 
     await _produce(
         events_topic,
-        {"ts": now_ms, "type": "run.replay_requested", "run_id": run_id, "seq": seq},
+        {
+            "ts": now_ms,
+            "type": "run.replay_requested",
+            "run_id": run_id,
+            "seq": seq,
+            "fail_at": applied_fail_at
+        },
         idem_key=f"evt:{run_id}:replay:{seq}"
     )
 
@@ -142,13 +193,13 @@ async def replay_run(run_id: str):
             "run_id": run_id,
             "workflow": meta.get("workflow", "demo"),
             "input": {"replay": True},
-            "fail_at": meta.get("fail_at"),
-            "replay_seq": seq,
+            "fail_at": applied_fail_at,
+            "replay_seq": seq
         },
-        idem_key=f"cmd:{run_id}:{seq}",
+        idem_key=f"cmd:{run_id}:{seq}"
     )
 
-    return {"ok": True, "run_id": run_id, "seq": seq}
+    return {"ok": True, "run_id": run_id, "seq": seq, "fail_at": applied_fail_at}
 
 
 @app.get("/runs/{run_id}/events")
@@ -163,7 +214,22 @@ async def stream_run_events(run_id: str, request: Request):
 
     async def event_gen():
         try:
+            # Always send a "connected" marker first
             yield f"data: {json.dumps({'type': 'sse.connected', 'run_id': run_id})}\n\n"
+
+            if run_id in DLQ_CACHE:
+                yield (
+                    "data: "
+                    + json.dumps(
+                        {
+                            "ts": int(time.time() * 1000),
+                            "type": "dlq.available",
+                            "run_id": run_id,
+                            "hint": "DLQ record exists for this run. Use /runs/{run_id}/dlq",
+                        }
+                    )
+                    + "\n\n"
+                )
 
             async for msg in driftq.consume_stream(
                 topic=events_topic, group=group, lease_ms=30000, timeout_s=60.0
@@ -201,12 +267,57 @@ async def emit_event(run_id: str, req: EmitRequest):
     await _produce(events_topic, req.event)
     return {"ok": True}
 
+
 @app.get("/debug/dlq/peek")
 async def peek_dlq(limit: int = 5):
+    """Debug helper: read a few DLQ payloads (not raw message envelopes)."""
     group = f"debug-dlq-{uuid.uuid4().hex[:8]}"
-    items = []
-    async for msg in driftq.consume_stream(topic="runs.dlq", group=group, lease_ms=30000, timeout_s=3.0):
-        items.append(msg)
+    items: list[dict] = []
+    async for msg in driftq.consume_stream(topic=DLQ_TOPIC, group=group, lease_ms=30000, timeout_s=3.0):
+        payload = driftq.extract_value(msg)
+        if isinstance(payload, dict):
+            items.append(payload)
         if len(items) >= limit:
             break
     return {"count": len(items), "items": items}
+
+
+@app.get("/runs/{run_id}/dlq")
+async def get_run_dlq(run_id: str):
+    rec = DLQ_CACHE.get(run_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="No DLQ record for this run_id")
+    return rec
+
+
+def _dlq_cache_put(run_id: str, payload: dict) -> None:
+    # Keep latest per run_id, bounded memory.
+    DLQ_CACHE[str(run_id)] = payload
+    if len(DLQ_CACHE) > DLQ_CACHE_MAX:
+        # Drop oldest inserted (dict preserves insertion order in modern Python)
+        oldest_key = next(iter(DLQ_CACHE.keys()))
+        DLQ_CACHE.pop(oldest_key, None)
+
+
+async def dlq_indexer() -> None:
+    await driftq.ensure_topic(DLQ_TOPIC)
+    group = "demo-api-dlq-indexer"
+
+    try:
+        async for msg in driftq.consume_stream(topic=DLQ_TOPIC, group=group, lease_ms=30000, timeout_s=60.0):
+            try:
+                payload = driftq.extract_value(msg) or {}
+                run_id = payload.get("run_id")
+                if run_id:
+                    _dlq_cache_put(str(run_id), payload)
+
+                # Ack so this indexer does NOT re-process the same DLQ forever
+                await driftq.ack(topic=DLQ_TOPIC, group=group, msg=msg)
+            except asyncio.CancelledError:
+                raise
+
+            except Exception:
+                pass
+
+    except asyncio.CancelledError:
+        raise

@@ -14,6 +14,11 @@ function eventTs(e: EventItem): number | null {
   return typeof e.ts === "number" ? e.ts : null;
 }
 
+function isDlqSignal(e: EventItem): boolean {
+  const t = eventType(e);
+  return t === "dlq.available" || t === "run.dlq" || t === "runs.dlq";
+}
+
 export async function copyToClipboard(text: string): Promise<boolean> {
   // Modern API first
   if (navigator.clipboard?.writeText) {
@@ -63,6 +68,8 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 
 export default function Home() {
   const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const REPLAY_FORCE_FAIL_AT = "none" as const;
+
   const [runId, setRunId] = useState<string>("");
   const [events, setEvents] = useState<EventItem[]>([]);
   const [status, setStatus] = useState<string>("idle");
@@ -70,15 +77,23 @@ export default function Home() {
   const [query, setQuery] = useState<string>("");
   const [copyStatus, setCopyStatus] = useState<string>("");
   const [failAt, setFailAt] = useState<"none" | "transform" | "tool_call">("none");
+
+  // DLQ inspector state
+  const [dlqRecord, setDlqRecord] = useState<EventItem | null>(null);
+  const [dlqStatus, setDlqStatus] = useState<string>("");
+  const [dlqAvailable, setDlqAvailable] = useState<boolean>(false);
+  const [dlqAutoFetched, setDlqAutoFetched] = useState<boolean>(false);
+
   const esRef = useRef<EventSource | null>(null);
 
   async function replayRun() {
     if (!runId) return;
 
     try {
-      const res = await fetch(`${API_URL}/runs/${runId}/replay`, {
+      const url = `${API_URL}/runs/${runId}/replay?fail_at=${encodeURIComponent(REPLAY_FORCE_FAIL_AT)}`;
+      const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json" }
       });
 
       if (!res.ok) {
@@ -87,9 +102,46 @@ export default function Home() {
         return;
       }
 
-      setStatus("replay requested");
+      setEvents((prev) => [
+        ...prev,
+        {
+          ts: Date.now(),
+          type: "ui.replay.fix_applied",
+          run_id: runId,
+          fail_at: null,
+          note: "Replay requested (fix applied ✅)"
+        }
+      ]);
+
+      setStatus("replay requested (fix applied ✅)");
     } catch (err) {
       setStatus(`replay failed: ${(err as Error)?.message ?? "unknown error"}`);
+    }
+  }
+
+  async function fetchDlq(targetRunId?: string) {
+    const rid = targetRunId ?? runId;
+    if (!rid) return;
+
+    setDlqStatus("loading...");
+    try {
+      const res = await fetch(`${API_URL}/runs/${rid}/dlq`);
+      if (!res.ok) {
+        const txt = (await res.text()).trim();
+        setDlqRecord(null);
+        setDlqStatus(
+          txt ? `No DLQ (${res.status}): ${txt}` : `No DLQ (${res.status})`
+        );
+        return;
+      }
+
+      const data = (await res.json()) as EventItem;
+      setDlqRecord(data);
+      setDlqStatus("✅ loaded");
+      setDlqAvailable(true);
+    } catch {
+      setDlqRecord(null);
+      setDlqStatus("❌ failed to fetch");
     }
   }
 
@@ -103,11 +155,18 @@ export default function Home() {
   async function createRun() {
     esRef.current?.close();
     esRef.current = null;
+
     setStatus("creating run...");
     setEvents([]);
     setRunId("");
     setTypeFilter("all");
     setQuery("");
+
+    // reset DLQ panel for a new run
+    setDlqRecord(null);
+    setDlqStatus("");
+    setDlqAvailable(false);
+    setDlqAutoFetched(false);
 
     try {
       const res = await fetch(`${API_URL}/runs`, {
@@ -152,8 +211,9 @@ export default function Home() {
 
   function connectSSE(id: string) {
     esRef.current?.close();
-
     setStatus("connecting SSE...");
+    setDlqAutoFetched(false);
+
     const es = new EventSource(`${API_URL}/runs/${id}/events?client_id=${encodeURIComponent(getClientId())}`);
     esRef.current = es;
 
@@ -161,8 +221,21 @@ export default function Home() {
       try {
         const parsed = JSON.parse(msg.data) as unknown;
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          setEvents((prev) => [...prev, parsed as EventItem]);
+          const evt = parsed as EventItem;
+
+          setEvents((prev) => [...prev, evt]);
           setStatus("streaming");
+
+          if (isDlqSignal(evt)) {
+            setDlqAvailable(true);
+            setDlqStatus((s) => s || "⚠️ DLQ available");
+
+            // Auto-fetch DLQ once so the user instantly sees the payload
+            if (!dlqAutoFetched) {
+              setDlqAutoFetched(true);
+              void fetchDlq(id);
+            }
+          }
         }
       } catch {
         // ignore bad events for now
@@ -232,6 +305,11 @@ export default function Home() {
     }
   }
 
+  async function onCopyDlq() {
+    if (!dlqRecord) return;
+    await onCopyEvent(dlqRecord);
+  }
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 p-8">
       <div className="mx-auto max-w-3xl space-y-6">
@@ -284,8 +362,23 @@ export default function Home() {
               className="rounded-lg border border-white/15 px-4 py-2 disabled:opacity-50 hover:bg-white/[0.05]"
               disabled={!runId}
               onClick={replayRun}
+              title="Replay with fix applied (fail_at = none)"
             >
               Replay Run
+            </button>
+
+            <button
+              className={[
+                "rounded-lg border px-4 py-2 disabled:opacity-50 hover:bg-white/[0.05]",
+                dlqAvailable
+                  ? "border-amber-400/50 bg-amber-400/10"
+                  : "border-white/15"
+              ].join(" ")}
+              disabled={!runId}
+              onClick={() => fetchDlq()}
+              title={dlqAvailable ? "DLQ available for this run" : ""}
+            >
+              View DLQ Payload
             </button>
           </div>
 
@@ -295,6 +388,54 @@ export default function Home() {
               {runId ? runId : "(none yet)"}
             </span>
           </div>
+
+          {runId && dlqAvailable ? (
+            <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="font-medium">⚠️ DLQ available for this run</div>
+                  <div className="text-xs text-white/70 mt-1">
+                    DriftQ persisted the failure + payload. Inspect it, then replay when ready.
+                  </div>
+                </div>
+                <button
+                  onClick={() => fetchDlq()}
+                  className="rounded-md bg-amber-300 text-black px-3 py-1 text-xs font-semibold hover:bg-amber-200"
+                >
+                  Load DLQ
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {runId ? (
+            <div className="text-sm text-white/70">
+              DLQ:{" "}
+              <span className="font-mono text-white/90">
+                {dlqStatus || "(not checked)"}
+              </span>
+
+              {dlqRecord ? (
+                <div className="mt-2">
+                  <div className="mb-2 flex items-center justify-between gap-3">
+                    <div className="font-mono text-xs text-white/60">
+                      Latest DLQ record for this run
+                    </div>
+                    <button
+                      onClick={onCopyDlq}
+                      className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-white/80 hover:bg-white/[0.06]"
+                    >
+                      Copy JSON
+                    </button>
+                  </div>
+
+                  <pre className="font-mono text-xs sm:text-sm text-white/90 whitespace-pre-wrap break-words max-h-64 overflow-auto rounded-md bg-black/30 p-3 border border-white/5">
+                    {JSON.stringify(dlqRecord, null, 2)}
+                  </pre>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
         </section>
 
         <section className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
@@ -303,8 +444,11 @@ export default function Home() {
               <h2 className="font-semibold">Timeline</h2>
               <p className="text-xs text-white/60">
                 Showing{" "}
-                <span className="font-mono text-white/80">{filteredEvents.length}</span>{" "}
-                of <span className="font-mono text-white/80">{events.length}</span>
+                <span className="font-mono text-white/80">
+                  {filteredEvents.length}
+                </span>{" "}
+                of{" "}
+                <span className="font-mono text-white/80">{events.length}</span>
               </p>
             </div>
 
@@ -328,13 +472,11 @@ export default function Home() {
                 className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-white/25"
               >
                 <option value="all">All types</option>
-                {
-                  types.map((t) => (
-                    <option key={t} value={t}>
-                      {t}
-                    </option>
-                  ))
-                }
+                {types.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
               </select>
 
               <button
@@ -347,6 +489,10 @@ export default function Home() {
                   setQuery("");
                   setTypeFilter("all");
                   setStatus("idle");
+                  setDlqRecord(null);
+                  setDlqStatus("");
+                  setDlqAvailable(false);
+                  setDlqAutoFetched(false);
                 }}
                 className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white/80 hover:bg-white/[0.06]"
               >
@@ -355,53 +501,51 @@ export default function Home() {
             </div>
           </div>
 
-          {
-            filteredEvents.length === 0
-            ? <p className="text-sm text-white/60">No events match your filters.</p>
-            : <ul className="space-y-3">
-                {filteredEvents
-                  .slice()
-                  // newest last by default
-                  .map((e, idx) => {
-                    const type = eventType(e);
-                    const ts = eventTs(e);
-                    const tsStr = ts ? new Date(ts).toLocaleTimeString() : null;
+          {filteredEvents.length === 0 ? (
+            <p className="text-sm text-white/60">No events match your filters.</p>
+          ) : (
+            <ul className="space-y-3">
+              {filteredEvents
+                .slice()
+                // newest last by default
+                .map((e, idx) => {
+                  const type = eventType(e);
+                  const ts = eventTs(e);
+                  const tsStr = ts ? new Date(ts).toLocaleTimeString() : null;
 
-                    return (
-                      <li
-                        key={`${type}-${idx}`}
-                        className="rounded-lg border border-white/10 bg-neutral-900/60 p-3"
-                      >
-                        <div className="mb-2 flex items-center justify-between gap-3">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs text-white/90">
-                              {type}
+                  return (
+                    <li
+                      key={`${type}-${idx}`}
+                      className="rounded-lg border border-white/10 bg-neutral-900/60 p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs text-white/90">
+                            {type}
+                          </span>
+                          {tsStr ? (
+                            <span className="font-mono text-xs text-white/50">
+                              {tsStr}
                             </span>
-                            {
-                              tsStr ? (
-                                <span className="font-mono text-xs text-white/50">
-                                  {tsStr}
-                                </span>
-                              ) : null
-                            }
-                          </div>
-
-                          <button
-                            onClick={() => onCopyEvent(e)}
-                            className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-white/80 hover:bg-white/[0.06]"
-                          >
-                            Copy JSON
-                          </button>
+                          ) : null}
                         </div>
 
-                        <pre className="font-mono text-xs sm:text-sm text-white/90 whitespace-pre-wrap break-words max-h-64 overflow-auto rounded-md bg-black/30 p-3 border border-white/5">
-                          {JSON.stringify(e, null, 2)}
-                        </pre>
-                      </li>
-                    );
-                  })}
-              </ul>
-          }
+                        <button
+                          onClick={() => onCopyEvent(e)}
+                          className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-white/80 hover:bg-white/[0.06]"
+                        >
+                          Copy JSON
+                        </button>
+                      </div>
+
+                      <pre className="font-mono text-xs sm:text-sm text-white/90 whitespace-pre-wrap break-words max-h-64 overflow-auto rounded-md bg-black/30 p-3 border border-white/5">
+                        {JSON.stringify(e, null, 2)}
+                      </pre>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
         </section>
       </div>
     </main>
