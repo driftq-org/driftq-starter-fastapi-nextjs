@@ -5,25 +5,56 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .driftq_client import DriftQClient
 
+# ------------------------------------------------------------
+# NOTE:
+# This repo is intentionally a *tiny* demo to show DriftQ in ~2 minutes.
+# DriftQ itself has way more going on (WAL, partitions, leases, metrics,backpressure, idempotency edge cases, observability, etc).
+# If you want the "real" implementation details, check out DriftQ-Core. (https://github.com/driftq-org/DriftQ-Core) 🙂
+# ------------------------------------------------------------
+
 DLQ_TOPIC = "runs.dlq"
 
 # Demo-only: keep latest DLQ record per run_id in memory
+# (This is NOT how you'd build it for real prod usage — it's just to keep the demo snappy.)
 DLQ_CACHE: dict[str, dict] = {}
-DLQ_CACHE_MAX = 200
+DLQ_CACHE_MAX = 200  # prevent unbounded growth in long dev sessions
 
 _dlq_task: asyncio.Task | None = None
 
 
+def _is_field_provided(model: BaseModel, field_name: str) -> bool:
+    """
+    Works for both Pydantic v2 (model_fields_set) and v1 (__fields_set__)
+    """
+    s = getattr(model, "model_fields_set", None)
+    if s is not None:
+        return field_name in s
+
+    s = getattr(model, "__fields_set__", None)
+    if s is not None:
+        return field_name in s
+
+    # If we can't tell, assume provided.
+    return True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start/stop background tasks (FastAPI lifespan, replaces deprecated on_event)."""
+    """
+    Start/stop background tasks (FastAPI lifespan, replaces deprecated on_event).
+
+    In this demo, we run a tiny DLQ indexer in the background so the UI can instantly
+    show "DLQ available" without making you hunt around.
+
+    In DriftQ-Core, this kind of thing is handled in a way more robust way. 🙂
+    """
     global _dlq_task
     _dlq_task = asyncio.create_task(dlq_indexer())
     try:
@@ -40,27 +71,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="driftq-fastapi-nextjs-starter API", lifespan=lifespan)
 
+# Demo CORS: keep it simple for local dev. For real apps you'd lock this down more
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
+# This client is the only thing this demo needs: talk to DriftQ over HTTP. DriftQ-Core is doing the heavy lifting behind the scenes
 driftq = DriftQClient()
 
 COMMANDS_TOPIC = "runs.commands"
 EVENTS_PREFIX = "runs.events."
 
 # tiny in-memory run registry (just for replay counters / metadata)
+# again: demo vibes only 😄
 RUNS: Dict[str, Dict[str, Any]] = {}
 
 
 class RunCreateRequest(BaseModel):
     workflow: str = "demo"
     input: Dict[str, Any] = Field(default_factory=dict)
-    fail_at: Optional[str] = None
+    fail_at: Optional[str] = None  # used only to force the "failure -> DLQ -> replay -> success" story
 
 
 class RunCreateResponse(BaseModel):
@@ -72,8 +106,19 @@ class EmitRequest(BaseModel):
     event: Dict[str, Any]
 
 
+class ReplayRequest(BaseModel):
+    # If omitted => inherit stored fail_at
+    # If provided as null => "fix applied" (no fail_at)
+    # If provided as a string => override
+    #
+    # This is the whole point of the demo: replay the same run but "fix applied"
+    # by clearing fail_at. DriftQ makes replay workflows easy
+    fail_at: Optional[str] = Field(default=None)
+
+
 @app.get("/healthz")
 async def healthz():
+    # Quick sanity check that DriftQ is reachable
     try:
         driftq_health = await driftq.healthz()
     except Exception as e:
@@ -82,6 +127,8 @@ async def healthz():
 
 
 async def _ensure_topic(topic: str) -> None:
+    # For the demo we create topics on-demand
+    # In more serious setups you'd probably create + manage topics explicitly
     try:
         await driftq.ensure_topic(topic)
     except Exception as e:
@@ -89,6 +136,8 @@ async def _ensure_topic(topic: str) -> None:
 
 
 async def _produce(topic: str, value: Dict[str, Any], *, idem_key: Optional[str] = None) -> None:
+    # Produce events/commands into DriftQ
+    # DriftQ-Core supports idempotency properly — this demo just uses it lightly
     try:
         if idem_key is None:
             await driftq.produce(topic, value)
@@ -100,6 +149,8 @@ async def _produce(topic: str, value: Dict[str, Any], *, idem_key: Optional[str]
 
 @app.post("/runs", response_model=RunCreateResponse)
 async def create_run(req: RunCreateRequest):
+    # Create a run + its private events topic
+    # This pattern is just for demo clarity (each run has its own timeline)
     run_id = uuid.uuid4().hex
     events_topic = f"{EVENTS_PREFIX}{run_id}"
 
@@ -116,13 +167,15 @@ async def create_run(req: RunCreateRequest):
 
     now_ms = int(time.time() * 1000)
 
+    # Emit run.created on the run's events topic (UI consumes this via SSE)
     await _produce(
         events_topic,
         {"ts": now_ms, "type": "run.created", "run_id": run_id, "workflow": req.workflow},
         idem_key=f"evt:{run_id}:created",
     )
 
-    # publish the command that the worker will execute
+    # Publish the command the worker consumes.
+    # Worker does the "workflow", and publishes status/events back to the run topic
     await _produce(
         COMMANDS_TOPIC,
         {
@@ -131,38 +184,25 @@ async def create_run(req: RunCreateRequest):
             "run_id": run_id,
             "workflow": req.workflow,
             "input": req.input,
-            "fail_at": req.fail_at,
+            "fail_at": req.fail_at
         },
-        idem_key=f"cmd:{run_id}:0",
+        idem_key=f"cmd:{run_id}:0"
     )
 
     return RunCreateResponse(run_id=run_id, events_topic=events_topic)
 
 
 @app.post("/runs/{run_id}/replay")
-async def replay_run(
-    run_id: str,
-    fail_at: Optional[str] = Query(
-        default=None,
-        description=(
-            "Optional override for replay failure injection: none|transform|tool_call. "
-            "If omitted, uses the run's original fail_at."
-        )
-    )
-):
+async def replay_run(run_id: str, req: ReplayRequest | None = None):
+    """
+    Replay is the "money shot" of the demo:
+      - First run fails and hits DLQ
+      - Then we replay with fail_at cleared (fix applied)
+      - Same run_id, new replay_seq, new outcome
+    """
     meta = RUNS.get(run_id)
     if not meta:
         raise HTTPException(status_code=404, detail="run not found")
-    applied_fail_at = meta.get("fail_at")
-
-    if fail_at is not None:
-        fa = (fail_at or "").strip().lower()
-        if fa in ("", "none"):
-            applied_fail_at = None
-        elif fa in ("transform", "tool_call"):
-            applied_fail_at = fa
-        else:
-            raise HTTPException(status_code=400, detail="fail_at must be one of: none, transform, tool_call")
 
     meta["replay_seq"] += 1
     seq = meta["replay_seq"]
@@ -170,6 +210,15 @@ async def replay_run(
 
     await _ensure_topic(COMMANDS_TOPIC)
     await _ensure_topic(events_topic)
+
+    # Decide fail_at for replay:
+    # - No body => inherit original meta["fail_at"]
+    # - Body with fail_at provided (even null) => override
+    #
+    # That null override is what lets the UI do "Replay (fix applied)" in one click
+    fail_at_to_use = meta.get("fail_at")
+    if req is not None and _is_field_provided(req, "fail_at"):
+        fail_at_to_use = req.fail_at  # may be None (fix applied)
 
     now_ms = int(time.time() * 1000)
 
@@ -180,7 +229,7 @@ async def replay_run(
             "type": "run.replay_requested",
             "run_id": run_id,
             "seq": seq,
-            "fail_at": applied_fail_at
+            "fail_at": fail_at_to_use
         },
         idem_key=f"evt:{run_id}:replay:{seq}"
     )
@@ -193,30 +242,36 @@ async def replay_run(
             "run_id": run_id,
             "workflow": meta.get("workflow", "demo"),
             "input": {"replay": True},
-            "fail_at": applied_fail_at,
+            "fail_at": fail_at_to_use,
             "replay_seq": seq
         },
         idem_key=f"cmd:{run_id}:{seq}"
     )
 
-    return {"ok": True, "run_id": run_id, "seq": seq, "fail_at": applied_fail_at}
+    return {"ok": True, "run_id": run_id, "seq": seq, "fail_at": fail_at_to_use}
 
 
 @app.get("/runs/{run_id}/events")
 async def stream_run_events(run_id: str, request: Request):
+    """
+    SSE stream: UI subscribes to a run's event topic
+    DriftQ is doing the streaming + leases + acking — this just forwards events to the browser
+    """
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run not found")
 
     events_topic = f"{EVENTS_PREFIX}{run_id}"
     client_id = request.query_params.get("client_id") or "default"
-    client_id = client_id[:32]  # keep it short/safe
+    client_id = client_id[:32]
     group = f"web-{run_id}-{client_id}"
 
     async def event_gen():
         try:
-            # Always send a "connected" marker first
+            # Always send a "connected" marker so the UI knows it's live
             yield f"data: {json.dumps({'type': 'sse.connected', 'run_id': run_id})}\n\n"
 
+            # UX trick: if our in-memory DLQ cache already has this run, tell UI right away
+            # In DriftQ-Core you'd do richer indexing/queries — this is just fast for demo
             if run_id in DLQ_CACHE:
                 yield (
                     "data: "
@@ -241,6 +296,8 @@ async def stream_run_events(run_id: str, request: Request):
                 if isinstance(evt, dict):
                     yield f"data: {json.dumps(evt)}\n\n"
 
+                # Ack so the web group doesn't keep re-reading the same messages forever
+                # (DriftQ handles the lease ownership rules under the hood.)
                 try:
                     await driftq.ack(topic=events_topic, group=group, msg=msg)
                 except Exception:
@@ -258,6 +315,8 @@ async def stream_run_events(run_id: str, request: Request):
 
 @app.post("/runs/{run_id}/emit")
 async def emit_event(run_id: str, req: EmitRequest):
+    # Debug / demo helper: push an event into the run timeline
+    # Not part of the "main story", just handy
     if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="run not found")
 
@@ -270,7 +329,10 @@ async def emit_event(run_id: str, req: EmitRequest):
 
 @app.get("/debug/dlq/peek")
 async def peek_dlq(limit: int = 5):
-    """Debug helper: read a few DLQ payloads (not raw message envelopes)."""
+    """
+    Debug helper: read a few DLQ payloads (not raw message envelopes)
+    Real DriftQ usage has more knobs + tooling; this is just for quick local sanity checks
+    """
     group = f"debug-dlq-{uuid.uuid4().hex[:8]}"
     items: list[dict] = []
     async for msg in driftq.consume_stream(topic=DLQ_TOPIC, group=group, lease_ms=30000, timeout_s=3.0):
@@ -284,6 +346,7 @@ async def peek_dlq(limit: int = 5):
 
 @app.get("/runs/{run_id}/dlq")
 async def get_run_dlq(run_id: str):
+    # UI uses this to fetch the DLQ payload instantly once DLQ is available
     rec = DLQ_CACHE.get(run_id)
     if not rec:
         raise HTTPException(status_code=404, detail="No DLQ record for this run_id")
@@ -291,15 +354,20 @@ async def get_run_dlq(run_id: str):
 
 
 def _dlq_cache_put(run_id: str, payload: dict) -> None:
-    # Keep latest per run_id, bounded memory.
+    # Demo cache: latest DLQ per run_id, bounded
     DLQ_CACHE[str(run_id)] = payload
     if len(DLQ_CACHE) > DLQ_CACHE_MAX:
-        # Drop oldest inserted (dict preserves insertion order in modern Python)
         oldest_key = next(iter(DLQ_CACHE.keys()))
         DLQ_CACHE.pop(oldest_key, None)
 
 
 async def dlq_indexer() -> None:
+    """
+    Demo-only: keep the latest DLQ record per run_id in memory so the UI can fetch it instantly.
+
+    DriftQ-Core has a lot more power/features than what we're doing here —
+    this is literally just to make the demo feel "product-y" in 2 minutes.
+    """
     await driftq.ensure_topic(DLQ_TOPIC)
     group = "demo-api-dlq-indexer"
 
@@ -311,13 +379,12 @@ async def dlq_indexer() -> None:
                 if run_id:
                     _dlq_cache_put(str(run_id), payload)
 
-                # Ack so this indexer does NOT re-process the same DLQ forever
                 await driftq.ack(topic=DLQ_TOPIC, group=group, msg=msg)
             except asyncio.CancelledError:
                 raise
-
             except Exception:
+                # We don't want the demo API to crash because of one weird message.
+                # In real systems you'd log/metric this properly
                 pass
-
     except asyncio.CancelledError:
         raise
