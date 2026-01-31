@@ -14,16 +14,21 @@ services:
       - "8000:8000"
     depends_on:
       - driftq
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
   worker:
-    build: ./worker
+    build: ./api
     environment:
       - DRIFTQ_HTTP_URL=http://driftq:8080
     depends_on:
       - driftq
+    command: ["python", "-m", "app.worker"]
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:8000"
     environment:
       - NEXT_PUBLIC_API_URL=http://localhost:8000
     ports:
