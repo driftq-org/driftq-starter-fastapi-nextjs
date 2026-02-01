@@ -1,216 +1,221 @@
-# driftq-starter-fastapi-nextjs
+# DriftQ Starter: FastAPI + Next.js (2‑Minute DLQ → Replay → Success Demo) 🚀
 
-A **FastAPI + Next.js** starter that demonstrates **durable AI/workflow execution** using **DriftQ-Core** (running via Docker).
+This repo is a **tiny "show it, don’t explain it" demo** of DriftQ running behind a normal **FastAPI + Next.js** app.
 
-This is intentionally **not** "hello world." The point is to show what teams actually need in production workflows:
+What you'll see in ~2 minutes:
+- FastAPI starts a "run" (basically "do this job") and publishes a command to DriftQ (think: enqueue work with a payload)
+- a worker picks it up, retries failures, and writes a **DLQ** record when it gives up
+- A worker (your executor) picks up that command from DriftQ. In a real app this worker is usually where you’d do stuff like:
+  - call an LLM (OpenAI/Anthropic/local)
+  - hit external APIs (Slack/Jira/GitHub/etc)
+  - run multi-step logic. If the work fails, the worker retries automatically (up to max_attempts). If it still can’t succeed,
+  it writes a **DLQ** record with the original payload + error so the job isn’t lost.
+- Next.js UI watches everything live via **SSE** (Server-Sent Events). You’ll see the run timeline update in real time, inspect the DLQ payload, and then hit **Replay (fix applied)** to re-run the same job after "fixing" the cause (in this demo, replay clears fail_at so it succeeds).
 
-✅ **Durable runs** (not "best effort")
-✅ **Live timeline** streamed to the UI (SSE)
-✅ **Retries + backoff** (demo-friendly)
-✅ **DLQ after max attempts** (so failures don’t vanish)
-✅ **Replay / redrive** a run on demand
-✅ **Idempotency-friendly** event publishing
+> Heads up: **DriftQ itself is way more powerful** than what this repo shows.
+> This is intentionally the smallest slice that proves the "DLQ → Replay → Success" story.
+> If you want the real engine + features, check out the **[DriftQ-Core](https://github.com/driftq-org/DriftQ-Core)** repo
 
 ---
 
-## ⚡ 2-minute demo (the money demo)
+## The punchline ✅
 
-### Prereqs
-- Docker Desktop (or Docker Engine)
-- `make` (recommended)
+Open the UI, click **🗂️ 2‑Minute Demo**, and you should see:
 
-### 0) Start the full stack (recommended)
-From repo root:
+1) **Fail (forced)**
+2) **DLQ persisted** (inspect the payload)
+3) **Replay with fix applied** (replay overrides `fail_at`)
+4) **Success** 🎉
+
+If it doesn’t reach Success, it’s almost always one of these:
+- the worker isn’t running (manual path), or
+- the replay endpoint isn’t actually applying `{"fail_at": null}`
+
+---
+
+## Quickstart (recommended) 🔥
+
+If you’re sharing this repo with someone, **don’t make them run 3 terminals**. Just do:
 
 ```bash
-make up
+python scripts/dev_up.py
+```
+
+That starts everything (DriftQ + API + worker + UI) via Docker Compose.
+
+When it’s up, you’ll have:
+- **UI:** http://localhost:3000
+- **API docs:** http://localhost:8000/docs
+- **DriftQ health:** http://localhost:8080/v1/healthz
+
+Then click **🗂️ 2‑Minute Demo** in the UI.
+
+### Is it normal that the terminal "keeps running"?
+Yep 😄 Docker is streaming logs. That’s a good thing.
+If you want it in the background, run:
+
+```bash
+python scripts/dev_up.py --detached
+```
+
+---
+
+## Bring everything down 🧹
+
+Normal "stop everything" (keeps volumes / WAL data):
+```bash
+python scripts/dev_down.py
+```
+
+If you want to **wipe everything** (including volumes / WAL / all persisted state):
+```bash
+python scripts/dev_down.py --wipe
+```
+
+If you want to be extra aggressive and also remove built images for this stack:
+```bash
+python scripts/dev_down.py --wipe --prune-images
+```
+
+---
+
+## Manual local dev (3 terminals)
+
+If you prefer running without Docker:
+
+### 0) Prereqs
+- Python **3.11+**
+- Node **18+**
+- DriftQ running somewhere (or use Docker for DriftQ only)
+
+### 1) API (Terminal 1)
+```bash
+cd api
+
+python -m venv .venv
+# Windows:
+.venv\Scripts\activate
+# macOS/Linux:
+source .venv/bin/activate
+
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+### 2) Worker (Terminal 2)
+```bash
+cd api
+# activate the same venv
+
+python -m app.worker
+```
+
+### 3) UI (Terminal 3)
+```bash
+cd web
+npm install
+
+# make sure web/.env.local contains:
+# NEXT_PUBLIC_API_URL=http://localhost:8000
+
+npm run dev
 ```
 
 Open:
 - UI: http://localhost:3000
-- API: http://localhost:8000  (health: http://localhost:8000/healthz)
-- DriftQ: http://localhost:8080
+- API docs: http://localhost:8000/docs
 
-### 1) Happy path run
-1. Open the UI
-2. Select `Fail: none`
-3. Click **Create Run**
-4. Click **Connect SSE**
+---
 
-✅ You should see something like:
-`run.created → worker.received → run.started → step.* → run.succeeded`
+## What DriftQ is doing for you here
 
-### 2) Deterministic failure (transform) → Retry → DLQ
-1. Select `Fail: transform`
-2. Click **Create Run**
-3. Click **Connect SSE**
+In this demo, DriftQ is basically the reliable middle layer between your API and your worker(s). It stores the command/event stream durably, handles retries + DLQ, and lets you replay the exact same run later when you’ve fixed the bug.
 
-✅ You should see:
-`step.started(transform) → run.attempt_failed → run.retry_scheduled` (repeats) → `run.dlq → run.failed`
+It’s useful because it solves annoying real-world problems like:
+- **Retries that don’t suck**: max attempts + backoff, and you can tune it per step (instead of while(true) chaos)
+- **DLQ**: failures don’t disappear into logs — you get a durable payload you can inspect
+- **Replay**: you can re-run the same run after you fix a bug / tweak a prompt / change a tool… without inventing your own replay system
+- **Durable event stream**: the UI (or logs/observability) can show a real audit trail of what happened and when
 
-This represents "**our code/data is bad**" (transform bug, invalid input, etc.).
-DriftQ makes it **auditable** and **replayable**, instead of silently dying.
+The biggest point: you probably don’t want to build workflow logic deep inside your API. It usually starts as "just a couple steps" and turns into a mini orchestration engine:
+- ad-hoc retries everywhere
+- weird state in the DB
+- background jobs that get stuck
+- no DLQ, no replay, and impossible debugging
 
-### 3) External-ish failure (tool_call) → Retry → DLQ (core AI pain point 💥)
-1. Select `Fail: tool_call`
-2. Click **Create Run**
-3. Click **Connect SSE**
+At that point you’ve basically rebuilt a worse version of a workflow engine, but now it’s welded into your API and hard to change. DriftQ is meant to be that "middle layer" so your API stays clean and your workflow behavior stays consistent.
 
-✅ You should see:
-`step.started(tool_call) → run.attempt_failed → run.retry_scheduled` (repeats) → `run.dlq → run.failed`
 
-This represents "**the outside world is flaky**" (LLM timeout, rate limit, tool API down).
-This is where DriftQ pays for itself: failures don’t vanish — they become a durable stream you can inspect, alert on, and replay.
+### Why this matters for LLM apps (and not just this toy demo)
+LLM workflows are *always* messy:
+- tool calls fail, time out, rate-limit, return junk
+- you need retries, but you also need to stop retrying eventually
+- you need a DLQ payload so you can inspect what actually happened
+- you need replay so you can re-run after you tweak prompts/tools/config
+- you want an audit trail so you can debug "why did the agent do that?"
 
-### 4) Replay / redrive
-Take the `run_id` shown in the UI and run:
+DriftQ gives you a clean pattern:
+**API emits a command → workers process → events stream back → failures become DLQ → replay when ready.**
+
+And yeah, DriftQ‑Core goes way beyond this demo (WAL, partitions, leases, metrics, backpressure, idempotency edge cases, observability, etc). This repo is just the "hello world that feels real".
+
+---
+
+## The 2‑Minute Demo (what to click) 🗂️
+
+1. Open the UI: http://localhost:3000
+2. Click **🗂️ 2‑Minute Demo**
+3. Watch the **Demo Script** panel:
+   - 🟢 step 1: fail (forced)
+   - 🟢 step 2: DLQ persisted
+   - 🟢 step 3: replay with fix applied
+   - 🟢 step 4: success
+
+You can also:
+- **View DLQ Payload** to fetch the latest DLQ record
+- **Replay Run (fix)** to manually replay with the fix applied
+- use **Search JSON** + **type filter**️ in Timeline to find events fast
+
+Example DLQ payload shape:
+```json
+{
+  "type": "runs.dlq",
+  "run_id": "...",
+  "replay_seq": 0,
+  "reason": "max_attempts",
+  "error": "forced failure at tool_call",
+  "command": { "type": "run.command", "fail_at": "tool_call" }
+}
+```
+
+---
+
+## Tests ✅
 
 ```bash
-curl -X POST http://localhost:8000/runs/<RUN_ID>/replay
-```
-
-✅ You should see replay-related events and the workflow executes again with a new `replay_seq`.
-
----
-
-## Create your own repo from this template
-
-1. Click **Use this template** (top-right on GitHub)
-2. Create a new repo (org or personal)
-3. Clone your new repo locally and run the demo above
-
----
-
-## Why DriftQ in a FastAPI + Next.js stack?
-
-Most "AI apps" quickly become **workflow apps**:
-- step-by-step execution (tools, transforms, model calls)
-- retries (timeouts happen constantly)
-- long-running work (minutes+)
-- event streaming to the UI (progress, partial results, errors)
-- redrive/replay when something fails
-
-If you build this yourself, you end up reinventing a queue + durable state + retries + DLQ + replay + observability.
-
-**DriftQ is the "workflow backbone"**:
-- Your API **publishes commands** to DriftQ
-- Workers **lease + execute** tasks (consumer group style)
-- `nack` triggers **redelivery** (used here to implement retries)
-- Events are written to a **per-run topic** and streamed to the UI
-
----
-
-## What "Fail:" means (the 3 options)
-
-The demo workflow runs these steps in order:
-
-`fetch_input → transform → tool_call → finalize`
-
-- **Fail: none** — happy path, proves end-to-end execution + SSE timeline.
-- **Fail: transform** — "our code/data broke" (deterministic failure class).
-- **Fail: tool_call** — "external dependency broke" (LLM/tool/API failure class).
-
-Keeping all three makes the value obvious in under 2 minutes.
-
----
-
-## What’s running (Docker Compose)
-
-- **driftq**: DriftQ-Core broker (pulled as a Docker image)
-- **api**: FastAPI backend (builds from `./api`)
-- **worker**: step executor (builds from `./api`, runs `python -m app.worker`)
-- **web**: Next.js UI (builds from `./web`)
-
----
-
-## Repo layout
-
-```text
-.
-├─ api/                  # FastAPI app + worker code
-├─ web/                  # Next.js UI
-├─ docker-compose.yml    # Local stack (driftq + api + worker + web)
-├─ Makefile              # Common dev commands
-└─ README.md
+cd api
+# activate venv
+pytest -q
 ```
 
 ---
 
-## Key endpoints
+## Troubleshooting 🔧
 
-- `POST /runs` → create a run and enqueue the first command
-- `GET /runs/{run_id}/events` → SSE stream for the run timeline
-- `POST /runs/{run_id}/replay` → replay/redrive a run
-- `POST /runs/{run_id}/emit` → emit a custom event (demo button uses this)
-- `GET /healthz` → API health
+### Demo times out waiting for DLQ or success
+- manual path: make sure the **worker** is running
+- docker path: make sure the containers are up (and not crashing)
+- UI should point at API: `NEXT_PUBLIC_API_URL=http://localhost:8000`
 
----
+### Replay never reaches Success
+Your replay endpoint must accept `{"fail_at": null}` and actually use it.
+(That’s what makes "Replay (fix applied)" work.)
 
-## Dev commands
-
-```bash
-make up        # docker compose up --build
-make logs      # follow logs
-make down      # stop
-make reset     # wipe volumes + restart (new WAL)
-```
+### DriftQ health endpoint returns "use /v1/* endpoints"
+Yep — use:
+- http://localhost:8080/v1/healthz
 
 ---
 
-## Persistence (WAL) — where the data lives
-
-In this starter, DriftQ stores its WAL inside a **Docker volume** mounted at `/data` in the container.
-
-To see the WAL inside the running DriftQ container:
-
-```bash
-docker ps --format "table {{.Names}}	{{.Status}}	{{.Image}}"
-docker exec -it <DRIFTQ_CONTAINER_NAME> ls -lah /data
-```
-
-To "start fresh" with a new WAL, use:
-
-```bash
-make reset
-```
-
----
-
-## How it works (high level)
-
-1. **UI** calls the **API** to start a run
-2. **API** creates a `run_id`, emits `run.created`, and publishes a command to `runs.commands`
-3. **Worker** consumes the command, executes steps, and emits events to `runs.events.<run_id>`
-4. **API** streams `runs.events.<run_id>` back to the UI via **SSE**
-5. Failure mode:
-   - Worker emits `run.attempt_failed`
-   - Worker `nack`s to request redelivery (retry)
-   - After `MAX_ATTEMPTS`, worker emits `run.dlq` + `run.failed` and publishes to `runs.dlq`
-
----
-
-## Configuration
-
-### DriftQ image
-
-If your repo has a `.env`, set the DriftQ image/tag there:
-
-```env
-DRIFTQ_IMAGE=ghcr.io/driftq-org/driftq-core:1.0.0
-```
-
-Pinning a version is recommended (avoid `latest` for reproducibility).
-
----
-
-## Next steps (what we’ll extend)
-
-This starter is intentionally minimal. The goal is to expand it into a "holy crap" showcase repo over time:
-
-- ✅ basic workflow + SSE timeline
-- ✅ failure injection (`transform`, `tool_call`) + retry + DLQ
-- ✅ replay/redrive
-- ⏭️ make `tool_call` a *real* external call (HTTP request + timeout + retry)
-- ⏭️ add a small "AI step" (LLM call) with idempotency and structured outputs
-- ⏭️ add basic metrics + a `/debug` page (lag, inflight, DLQ counts)
-- ⏭️ add a "Run Inspector" panel (attempts, replay history, DLQ payload)
+## License
+TBD
