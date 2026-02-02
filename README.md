@@ -4,12 +4,12 @@ This repo is a **tiny "show it, don’t explain it" demo** of DriftQ running beh
 
 What you'll see in ~2 minutes:
 - FastAPI starts a "run" (basically "do this job") and publishes a command to DriftQ (think: enqueue work with a payload)
-- a worker picks it up, retries failures, and writes a **DLQ** record when it gives up
+- DriftQ holds that command durably (and the event stream for the run)
 - A worker (your executor) picks up that command from DriftQ. In a real app this worker is usually where you’d do stuff like:
   - call an LLM (OpenAI/Anthropic/local)
   - hit external APIs (Slack/Jira/GitHub/etc)
-  - run multi-step logic. If the work fails, the worker retries automatically (up to max_attempts). If it still can’t succeed,
-  it writes a **DLQ** record with the original payload + error so the job isn’t lost.
+  - run multi-step logic
+- If the work fails, the worker retries automatically (up to max_attempts). If it still can’t succeed, it writes a **DLQ** record with the original payload + error so the job isn’t lost.
 - Next.js UI watches everything live via **SSE** (Server-Sent Events). You’ll see the run timeline update in real time, inspect the DLQ payload, and then hit **Replay (fix applied)** to re-run the same job after "fixing" the cause (in this demo, replay clears fail_at so it succeeds).
 
 > Heads up: **DriftQ itself is way more powerful** than what this repo shows.
@@ -33,12 +33,45 @@ If it doesn’t reach Success, it’s almost always one of these:
 
 ---
 
+## Fail modes (what that dropdown actually means) 🎛️
+
+In the UI you’ll see a `Fail:` dropdown. This is **demo-only** — it’s just a chaos knob to force a failure at a specific stage so you can prove retries + DLQ + replay.
+
+### **Fail: none**
+- Meaning: **don’t force any failure**
+- What happens: the run should succeed normally ✅
+- Real-world vibe: "happy path" (tools/API calls returned, transforms succeeded, etc.)
+
+### **Fail: transform**
+- Meaning: force a failure during the **transform / processing step**
+- What happens: the worker fails while doing internal logic → retries → DLQ after max attempts ❌
+- Real-world vibe: "my code messed up":
+  - schema mismatch, parsing errors
+  - unexpected nulls / missing fields
+  - business logic throws, validation fails
+
+### **Fail: tool_call**
+- Meaning: force a failure during the **external call / tool step**
+- What happens: the worker fails when it tries to call something outside itself → retries → DLQ ❌
+- Real-world vibe: "the outside world messed up":
+  - LLM provider rate limits / timeouts / 5xx
+  - external APIs failing (Slack/Jira/GitHub/etc)
+  - DB / vector DB (Qdrant) issues
+  - flaky network stuff
+
+Quick mental model:
+- **transform** = "my code"
+- **tool_call** = "external dependency (LLM/tool/API)"
+- **none** = "no forced chaos"
+
+---
+
 ## Quickstart (recommended) 🔥
 
 If you’re sharing this repo with someone, **don’t make them run 3 terminals**. Just do:
 
 ```bash
-python scripts/dev_up.py
+python api/scripts/dev_up.py
 ```
 
 That starts everything (DriftQ + API + worker + UI) via Docker Compose.
@@ -50,31 +83,21 @@ When it’s up, you’ll have:
 
 Then click **🗂️ 2‑Minute Demo** in the UI.
 
-### Is it normal that the terminal "keeps running"?
-Yep 😄 Docker is streaming logs. That’s a good thing.
-If you want it in the background, run:
-
-```bash
-python scripts/dev_up.py --detached
-```
-
----
-
 ## Bring everything down 🧹
 
 Normal "stop everything" (keeps volumes / WAL data):
 ```bash
-python scripts/dev_down.py
+python api/scripts/dev_down.py
 ```
 
 If you want to **wipe everything** (including volumes / WAL / all persisted state):
 ```bash
-python scripts/dev_down.py --wipe
+python api/scripts/dev_down.py --wipe
 ```
 
 If you want to be extra aggressive and also remove built images for this stack:
 ```bash
-python scripts/dev_down.py --wipe --prune-images
+python api/scripts/dev_down.py --wipe --prune-images
 ```
 
 ---
@@ -129,7 +152,7 @@ Open:
 
 ## What DriftQ is doing for you here
 
-In this demo, DriftQ is basically the reliable middle layer between your API and your worker(s). It stores the command/event stream durably, handles retries + DLQ, and lets you replay the exact same run later when you’ve fixed the bug.
+In this demo, DriftQ is basically the reliable middle layer between your API and your worker(s) — it’s what turns "best-effort background tasks" into **auditable, retryable, replayable runs** with **DLQ** when things go sideways.
 
 It’s useful because it solves annoying real-world problems like:
 - **Retries that don’t suck**: max attempts + backoff, and you can tune it per step (instead of while(true) chaos)
@@ -144,7 +167,6 @@ The biggest point: you probably don’t want to build workflow logic deep inside
 - no DLQ, no replay, and impossible debugging
 
 At that point you’ve basically rebuilt a worse version of a workflow engine, but now it’s welded into your API and hard to change. DriftQ is meant to be that "middle layer" so your API stays clean and your workflow behavior stays consistent.
-
 
 ### Why this matters for LLM apps (and not just this toy demo)
 LLM workflows are *always* messy:
