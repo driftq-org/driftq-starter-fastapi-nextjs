@@ -236,8 +236,3 @@ Your replay endpoint must accept `{"fail_at": null}` and actually use it.
 ### DriftQ health endpoint returns "use /v1/* endpoints"
 Yep — use:
 - http://localhost:8080/v1/healthz
-
----
-
-## License
-TBD
