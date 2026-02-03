@@ -2,6 +2,9 @@
 
 This repo is a **tiny "show it, don’t explain it" demo** of DriftQ running behind a normal **FastAPI + Next.js** app.
 
+## Architecture
+![DriftQ Starter data flow](docs/flowchart.png)
+
 What you'll see in ~2 minutes:
 - FastAPI starts a "run" (basically "do this job") and publishes a command to DriftQ (think: enqueue work with a payload)
 - DriftQ holds that command durably (and the event stream for the run)
