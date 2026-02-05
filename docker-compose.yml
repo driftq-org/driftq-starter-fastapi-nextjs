@@ -1,6 +1,6 @@
 services:
   driftq:
-    image: ${DRIFTQ_IMAGE:-ghcr.io/driftq-org/driftqd:latest}
+    image: ${DRIFTQ_IMAGE:-ghcr.io/driftq-org/driftq-core:latest}
     ports:
       - "8080:8080"
     volumes:
