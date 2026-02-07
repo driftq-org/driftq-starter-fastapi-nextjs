@@ -101,7 +101,28 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 }
 
 export default function Home() {
-  const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+  const API_URL = useMemo(() => {
+    const envUrl = process.env.NEXT_PUBLIC_API_URL;
+    if (typeof window === "undefined") {
+      return envUrl || "http://localhost:8000";
+    }
+
+    const { protocol, hostname } = window.location;
+    const isCodespacesHost = hostname.endsWith(".app.github.dev");
+
+    if (envUrl && !envUrl.includes("localhost")) {
+      return envUrl;
+    }
+
+    if (isCodespacesHost) {
+      const codespacesApiHost = hostname.replace(/-3000\./, "-8000.");
+      if (codespacesApiHost !== hostname) {
+        return `${protocol}//${codespacesApiHost}`;
+      }
+    }
+
+    return `${protocol}//${hostname}:8000`;
+  }, []);
 
   const [runId, setRunId] = useState<string>("");
   const [events, setEvents] = useState<EventItem[]>([]);

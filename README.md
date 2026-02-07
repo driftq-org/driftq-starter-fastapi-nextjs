@@ -84,6 +84,12 @@ When it’s up, you’ll have:
 - **API docs:** http://localhost:8000/docs
 - **DriftQ health:** http://localhost:8080/v1/healthz
 
+If you’re running this in **GitHub Codespaces** (or any remote dev env), **don’t use `localhost`**.
+Use the **forwarded URL** for each port instead:
+- UI: forwarded URL for port **3000**
+- API docs/health: forwarded URL for port **8000**
+- DriftQ health: forwarded URL for port **8080**
+
 Then click **🗂️ 2‑Minute Demo** in the UI.
 
 ## Bring everything down 🧹
@@ -143,6 +149,7 @@ npm install
 
 # make sure web/.env.local contains:
 # NEXT_PUBLIC_API_URL=http://localhost:8000
+# Codespaces: use the forwarded URL for port 8000
 
 npm run dev
 ```
@@ -150,6 +157,8 @@ npm run dev
 Open:
 - UI: http://localhost:3000
 - API docs: http://localhost:8000/docs
+
+Codespaces note: use the **forwarded URL** for ports **3000** and **8000** (not `localhost`).
 
 ---
 
@@ -201,6 +210,8 @@ You can also:
 - **Replay Run (fix)** to manually replay with the fix applied
 - use **Search JSON** + **type filter**️ in Timeline to find events fast
 
+Codespaces note: if you’re remote, use the **forwarded URL** for port **3000** (not `localhost`).
+
 Example DLQ payload shape:
 ```json
 {
@@ -231,6 +242,7 @@ pytest -q
 - manual path: make sure the **worker** is running
 - docker path: make sure the containers are up (and not crashing)
 - UI should point at API: `NEXT_PUBLIC_API_URL=http://localhost:8000`
+  - Codespaces: use the **forwarded URL** for port **8000**
 
 ### Replay never reaches Success
 Your replay endpoint must accept `{"fail_at": null}` and actually use it.
