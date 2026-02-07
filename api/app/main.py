@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -72,9 +73,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="driftq-fastapi-nextjs-starter API", lifespan=lifespan)
 
 # Demo CORS: keep it simple for local dev. For real apps you'd lock this down more
+cors_origins_env = os.getenv("CORS_ALLOW_ORIGINS", "")
+cors_allow_origins = ["http://localhost:3000"]
+if cors_origins_env.strip():
+    cors_allow_origins.extend([o.strip() for o in cors_origins_env.split(",") if o.strip()])
+
+cors_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.app\.github\.dev")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=cors_allow_origins,
+    allow_origin_regex=cors_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
