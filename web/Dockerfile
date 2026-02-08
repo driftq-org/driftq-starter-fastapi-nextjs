@@ -8,8 +8,13 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
+# Build-time args (needed because Next.js rewrites are baked during build)
 ARG NEXT_PUBLIC_API_URL
+ARG API_INTERNAL_URL
+
+# Expose them to the build step
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+ENV API_INTERNAL_URL=$API_INTERNAL_URL
 
 RUN npm run build
 

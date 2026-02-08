@@ -29,6 +29,7 @@ services:
       context: ./web
       args:
         NEXT_PUBLIC_API_URL: "/api"
+        API_INTERNAL_URL: "http://api:8000"
     environment:
       - API_INTERNAL_URL=http://api:8000
       - NEXT_PUBLIC_API_URL=/api
