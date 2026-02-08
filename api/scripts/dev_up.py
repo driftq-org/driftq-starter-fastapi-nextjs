@@ -4,7 +4,7 @@ import sys
 SERVICES = {
     "web": ("3000", "UI", "/"),
     "api": ("8000", "API Docs", "/docs"),
-    "driftq": ("8080", "DriftQ Health", "/v1/healthz"),
+    "driftq": ("8080", "DriftQ Health", "/v1/healthz")
 }
 
 def compose_base_cmd():

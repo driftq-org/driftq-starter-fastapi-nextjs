@@ -316,9 +316,8 @@ async def stream_run_events(run_id: str, request: Request):
             return
 
     resp = StreamingResponse(event_gen(), media_type="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Accel-Buffering"] = "no"
-    resp.headers["Connection"] = "keep-alive"
     return resp
 
 
