@@ -78,7 +78,7 @@ cors_allow_origins = ["http://localhost:3000"]
 if cors_origins_env.strip():
     cors_allow_origins.extend([o.strip() for o in cors_origins_env.split(",") if o.strip()])
 
-cors_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"https://.*\.app\.github\.dev")
+cors_origin_regex = os.getenv("CORS_ALLOW_ORIGIN_REGEX", r"^https://.*\.(app\.github\.dev|githubpreview\.dev)$")
 
 app.add_middleware(
     CORSMiddleware,
@@ -316,9 +316,8 @@ async def stream_run_events(run_id: str, request: Request):
             return
 
     resp = StreamingResponse(event_gen(), media_type="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Accel-Buffering"] = "no"
-    resp.headers["Connection"] = "keep-alive"
     return resp
 
 

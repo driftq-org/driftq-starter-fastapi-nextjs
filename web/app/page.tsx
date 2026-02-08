@@ -244,7 +244,7 @@ export default function Home() {
 
     setDlqStatus("loading...");
     try {
-      const res = await fetch(`${API_URL}/runs/${rid}/dlq`);
+      const res = await fetch(`${API_URL}/runs/${rid}/dlq`, { credentials: "include" });
       if (!res.ok) {
         const txt = (await res.text()).trim();
         setDlqRecord(null);
@@ -281,7 +281,7 @@ export default function Home() {
     setStatus("connecting SSE...");
     dlqAutoFetchedRef.current = false;
 
-    const es = new EventSource(`${API_URL}/runs/${id}/events?client_id=${encodeURIComponent(getClientId())}`);
+    const es = new EventSource(`${API_URL}/runs/${id}/events?client_id=${encodeURIComponent(getClientId())}`, { withCredentials: true });
     esRef.current = es;
 
     es.onmessage = (msg) => {
@@ -376,6 +376,7 @@ export default function Home() {
     setShowDlqDetails(true);
 
     const res = await fetch(`${API_URL}/runs`, {
+      credentials: "include",
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -414,6 +415,7 @@ export default function Home() {
 
     try {
       const res = await fetch(`${API_URL}/runs/${rid}/replay`, {
+        credentials: "include",
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ fail_at: null })
@@ -454,6 +456,7 @@ export default function Home() {
 
     try {
       await fetch(`${API_URL}/runs/${runId}/emit`, {
+        credentials: "include",
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ event: { type: "demo.ping", msg: "hello from web", ts: Date.now() }})
@@ -523,7 +526,7 @@ export default function Home() {
           }
 
           try {
-            const res = await fetch(`${API_URL}/runs/${id}/dlq`);
+            const res = await fetch(`${API_URL}/runs/${id}/dlq`, { credentials: "include" });
             if (res.ok) {
               const data = (await res.json()) as EventItem;
               setDlqRecord(data);
